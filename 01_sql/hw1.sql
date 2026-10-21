@@ -24,10 +24,14 @@ UNION ALL SELECT 'messages',        count(*) FROM messages;
 -- ЗАДАНИЕ А1
 -- 1. Категория и конкретный тип колонок:
 --    vacancies.salary_from        — категория: числовой        тип: INT
---    vacancies.vacancy_name       — категория: строковый       тип: VARCHAR
+--    vacancies.vacancy_name       — категория: строковый       тип: *TEXT
 --    vacancies.published_at       — категория: дата и время    тип: DATETIME
 --    employers.is_accredited_it   — категория: логический      тип: BOOLEAN
 --    responses.created_at         — категория: дата и время    тип: DATETIME
+--
+--    *:
+--    TEXT в PostgreSQL хранит строку любой длины. VARCHAR без (n) ведёт себя
+--    так же, а VARCHAR(n) дополнительно проверяет длину. На скорость это не влияет.
 --
 -- 2. Первичные ключи таблиц:
 --    areas: area_id
@@ -340,6 +344,32 @@ GROUP BY employer_name
 ORDER BY count(res.response_id) DESC;
 -- total row cnt = 11
 
+-- Запрос 3: единственная вакансия «ГринЭнерго» — что с ней не так
+SELECT v.vacancy_id, v.vacancy_name, v.professional_role, v.experience,
+       v.employment, v.salary_from, v.salary_to, v.published_at, v.closed_at,
+       ar.area_name
+FROM vacancies v
+JOIN employers em ON em.employer_id = v.employer_id
+JOIN areas ar ON ar.area_id = v.area_id
+WHERE em.employer_name = 'ГринЭнерго';
+-- 1043 | Стажёр: разработчик | Разработчик | Нет опыта | Стажировка |
+-- salary_from NULL | salary_to NULL | 2026-04-06 | 2026-05-04 | Казань
+
+-- Запрос 4: вакансии того же направления и число откликов на каждую
+SELECT v.vacancy_id, v.vacancy_name, v.salary_from, v.published_at, v.closed_at,
+       count(r.response_id) AS responses_cnt
+FROM vacancies v
+LEFT JOIN responses r ON r.vacancy_id = v.vacancy_id
+WHERE v.professional_role = (
+    SELECT v2.professional_role
+    FROM vacancies v2
+    JOIN employers em ON em.employer_id = v2.employer_id
+    WHERE em.employer_name = 'ГринЭнерго')
+GROUP BY v.vacancy_id, v.vacancy_name, v.salary_from, v.published_at, v.closed_at
+ORDER BY responses_cnt DESC;
+-- 15 вакансий; без откликов 4: 1043, 1042, 1032, 1041
+-- стажировки «Стажёр: разработчик»: 27, 9, 6, 0, 0 откликов
+
 -- Вывод:
 -- Вакансий на работодателя считаем через count(DISTINCT vacancy_id): после
 -- JOIN с responses у вакансии столько строк, сколько у неё откликов, и
@@ -348,9 +378,19 @@ ORDER BY count(res.response_id) DESC;
 -- с NULL, и count(*) выдал бы 1 вместо 0.
 --
 -- LEFT JOIN вернул 12 работодателей, INNER JOIN только 11: исчезла
--- компания «ГринЭнерго». Это содержательная потеря: у неё 1 вакансия
--- и 0 откликов, то есть именно тот работодатель, которого HR стоит
--- спросить, почему нет интереса. INNER JOIN такие случаи скрывает.
+-- компания «ГринЭнерго» (1 вакансия, 0 откликов). INNER JOIN такие
+-- случаи скрывает, а HR они важны.
+--
+-- Запросы 3 и 4 показывают, что именно у неё не так. Единственная
+-- вакансия (1043, стажёр-разработчик в Казани) уже закрыта: опубликована
+-- 06.04.2026, закрыта 04.05.2026, то есть была открыта 28 дней, и
+-- зарплата в ней не указана. Но зарплата сама по себе ноль не объясняет:
+-- у вакансий этого направления без зарплаты есть отклики (14 и 6), а
+-- стажировка 1042 с зарплатой 50 000 тоже осталась без откликов. Среди
+-- пяти стажировок «Стажёр: разработчик» откликов 27, 9, 6, 0 и 0, то есть
+-- интерес к ним сильно неравномерный.
+-- Итог: можно утверждать, что вакансия была закрытой без единого отклика
+-- при отсутствии зарплаты, но причину по данным установить нельзя.
 --
 -- Правило: если вопрос про «у кого мало или нет» и нулевое значение
 -- метрики важно, беру LEFT JOIN от основной сущности (работодателя).
@@ -373,6 +413,10 @@ SELECT date_trunc('month', created_at)::date AS month,
 FROM responses
 GROUP BY 1 ORDER BY 1;
 
+-- Проверка: до какой даты есть данные в responses
+SELECT max(created_at) FROM responses;
+-- 2026-08-15 08:00:00
+
 
 -- Вывод:
 -- Максимальная конверсия в июне: 19,5% (23 приглашения на 118 откликов).
@@ -382,8 +426,9 @@ GROUP BY 1 ORDER BY 1;
 -- приглашение. Для планирования набора можно опираться лишь на то, что
 -- конверсия колеблется в диапазоне ~13–20%.
 --
--- Последний месяц (август) в таблице неполный: данные в responses
--- заканчиваются 15.08.2026, это всего 41 отклик и 3 приглашения.
+-- Последний месяц (август) в таблице неполный: по запросу max(created_at)
+-- данные в responses заканчиваются 15.08.2026 (08:00), это всего 41 отклик
+-- и 3 приглашения.
 -- Минимум 7,3% получен на крошечной выборке и неполном месяце,
 -- поэтому август лучше исключить из выводов.
 
@@ -467,19 +512,19 @@ GROUP BY 1;
 SELECT
   v.professional_role,
   count(DISTINCT v.vacancy_id) AS vacancies,
-  sum(v.salary_from) as total_salary,
+  round(avg(v.salary_from), 0) AS avg_salary_from,
   round(sum(rc.cnt)::NUMERIC / count(DISTINCT v.vacancy_id), 1) AS responses_per_vacancy
 FROM vacancies v
 LEFT JOIN (SELECT vacancy_id, count(*) as cnt FROM responses GROUP BY vacancy_id) rc
   ON v.vacancy_id = rc.vacancy_id
 WHERE v.closed_at IS NULL
 GROUP BY 1;
--- * Замечание к total_salary: сумма нижних границ зарплат по направлению
---   смысла не имеет. Она растёт вместе с числом вакансий и сравнивает
---   размеры направлений, а не уровень оплаты: у аналитиков данных сумма
---   815 000 больше, чем у разработчиков (665 000), только потому что
---   вакансий 11 против 8. Для сравнения зарплат нужна средняя:
---   74 091 у аналитиков против 95 000 у разработчиков.
+-- * Замечание к зарплате: в исходном запросе стояла sum(salary_from), но
+--   сумма нижних границ по направлению смысла не имеет. Она растёт вместе
+--   с числом вакансий и сравнивает размеры направлений, а не уровень
+--   оплаты: у аналитиков данных сумма (815 000) больше, чем у разработчиков
+--   (665 000), только потому что вакансий 11 против 8. Поэтому в
+--   исправленном запросе выведена средняя нижняя граница: 74 091 у аналитиков против 95 000 у разработчиков.
 
 
 -- Какие два правила из лекции защитили бы от этих ошибок при написании запроса:
